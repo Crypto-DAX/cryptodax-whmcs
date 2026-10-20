@@ -44,9 +44,9 @@ delivers all events to merchants.webhook_url.
 
 CREATE INVOICE
 --------------
-POST {API_URL}/v1/merchant/invoices
+POST {API_URL}/v1/invoices
 
-Full example: https://pay.cryptodax.io/api/v1/merchant/invoices
+Full example: https://pay.cryptodax.io/api/v1/invoices
 
 Headers:
     Authorization: Bearer <merchant-api-key>
@@ -57,24 +57,32 @@ Request:
   "amount": "10.00",
   "currency": "USD",
   "order_id": "123",
-  "description": "Invoice #123"
+  "description": "Invoice #123",
+  "expire_minutes": 1440
 }
 
 Notes:
 - order_id must match ^[A-Za-z0-9]+$ (WHMCS invoice IDs are numeric, so they are valid).
-- Repeating the same order_id + amount returns the existing invoice (idempotent refresh).
+- Repeating the same order_id + amount returns the existing invoice.
+- If that invoice has expired, the backend renews it with a fresh expiration time.
 - A different amount for the same order_id returns HTTP 409.
-- callback_url, return_url, metadata, webhook_url, and Idempotency-Key are not part of this API.
+- callback_url and description are accepted but are not currently persisted.
+- return_url, metadata, webhook_url, and Idempotency-Key are not part of this API.
 
-Response (201 or 200):
+Response (201):
 {
   "invoice_id": "a1b2c3d4e5f678901234567890123456",
   "amount": "10.00",
   "currency": "USD",
+  "fee_payer": "merchant",
+  "fee": "0.10",
+  "total_due": "10.00",
+  "merchant_net": "9.90",
   "order_id": "123",
   "callback_url": null,
   "description": null,
   "status": "pending",
+  "created_at": 1719913600,
   "expires_at": 1720000000,
   "paid_at": null
 }
@@ -153,7 +161,8 @@ SECURITY / RELIABILITY
 - Transaction ID is used for webhook/payment idempotency.
 - WHMCS checkCbInvoiceID() and checkCbTransID() are retained.
 - Amount and currency are checked before addInvoicePayment().
-- Duplicate order_id + amount reuses the CryptoDAX invoice.
+- Duplicate order_id + amount reuses the CryptoDAX invoice and renews it after expiration.
+- CryptoDAX retries temporary webhook failures (HTTP 408, 429, and selected 5xx responses).
 - Do not log API keys or webhook secrets.
 
 LIMITATIONS

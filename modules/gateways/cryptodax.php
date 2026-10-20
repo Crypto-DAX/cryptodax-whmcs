@@ -62,7 +62,7 @@ function cryptodax_config()
 /**
  * Create/retrieve a CryptoDAX invoice and render a Pay button.
  *
- * POST /api/v1/merchant/invoices
+ * POST /api/v1/invoices
  * Duplicate WHMCS invoice IDs reuse the same CryptoDAX order_id.
  */
 function cryptodax_link($params)
@@ -90,9 +90,10 @@ function cryptodax_link($params)
         'currency' => 'USD',
         'order_id' => $invoiceId,
         'description' => $description,
+        'expire_minutes' => 1440,
     ];
 
-    $ch = curl_init($apiUrl . '/v1/merchant/invoices');
+    $ch = curl_init($apiUrl . '/v1/invoices');
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST => true,

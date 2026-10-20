@@ -94,7 +94,7 @@ if (!in_array($event, ['invoice.paid', 'invoice.overpaid'], true)) {
 
 $invoiceId = $payload['order_id'] ?? null;
 $cryptodaxInvoiceId = (string) ($payload['invoice_id'] ?? '');
-$paymentAmount = isset($payload['amount']) ? (float) $payload['amount'] : null;
+$paymentAmount = $payload['amount'] ?? null;
 $currency = strtoupper((string) ($payload['currency'] ?? ''));
 
 $transactions = [];
@@ -117,7 +117,7 @@ if ($transactionId === null || $transactionId === '') {
     cryptodax_webhook_response(400, ['ok' => false, 'error' => 'missing_transaction_id']);
 }
 
-if ($paymentAmount === null || $paymentAmount <= 0) {
+if (!is_numeric($paymentAmount) || (float) $paymentAmount <= 0) {
     cryptodax_webhook_response(400, ['ok' => false, 'error' => 'invalid_amount']);
 }
 
@@ -173,10 +173,10 @@ if (!$invoice) {
     cryptodax_webhook_response(404, ['ok' => false, 'error' => 'invoice_not_found']);
 }
 
-$expectedAmount = round((float) $invoice->total, 2);
-$receivedAmount = round((float) $paymentAmount, 2);
+$expectedAmount = number_format((float) $invoice->total, 2, '.', '');
+$receivedAmount = number_format((float) $paymentAmount, 2, '.', '');
 
-if (abs($expectedAmount - $receivedAmount) > 0.01) {
+if ($expectedAmount !== $receivedAmount) {
     logTransaction(
         $gatewayParams['name'],
         [
@@ -219,7 +219,7 @@ logTransaction(
 addInvoicePayment(
     $invoiceId,
     (string) $transactionId,
-    $receivedAmount,
+    (float) $receivedAmount,
     0.00,
     $gatewayModuleName
 );
