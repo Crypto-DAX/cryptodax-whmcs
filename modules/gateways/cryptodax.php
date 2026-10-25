@@ -1,153 +1,131 @@
 <?php
 /**
- * CryptoDAX WHMCS Third Party Payment Gateway
+ * CryptoDAX payment gateway for WHMCS 7.x / 8.x
  *
- * Webhook-first design:
- * - The browser return URL is UX only.
- * - An invoice is marked paid ONLY by a verified CryptoDAX webhook.
+ * Flow:
+ *  1. Client clicks "Pay" on the invoice -> POST /v1/invoices (USD)
+ *  2. Client is redirected to the CryptoDAX checkout page
+ *  3. CryptoDAX POSTs a JSON webhook to modules/gateways/callback/cryptodax.php
+ *  4. The callback re-checks the payment through the API (verify) and marks the invoice paid
  */
 
-if (!defined("WHMCS")) {
-    die("This file cannot be accessed directly");
+if (!defined('WHMCS')) {
+    die('This file cannot be accessed directly');
 }
+
+require_once __DIR__ . '/cryptodax/lib.php';
 
 function cryptodax_MetaData()
 {
-    return [
+    return array(
         'DisplayName' => 'CryptoDAX',
-        'APIVersion' => '1.1',
-        'DisableLocalCreditCardInput' => true,
-        'TokenisedStorage' => false,
-    ];
+        'APIVersion'  => '1.1',
+    );
 }
 
 function cryptodax_config()
 {
-    return [
-        'FriendlyName' => [
-            'Type' => 'System',
-            'Value' => 'CryptoDAX',
-        ],
-        'apiUrl' => [
-            'FriendlyName' => 'API URL',
-            'Type' => 'text',
-            'Size' => '60',
-            'Default' => 'https://pay.cryptodax.io/api',
-            'Description' => 'CryptoDAX API base URL, without trailing slash. Example: https://pay.cryptodax.io/api',
-        ],
-        'checkoutBaseUrl' => [
-            'FriendlyName' => 'Checkout Base URL',
-            'Type' => 'text',
-            'Size' => '60',
-            'Default' => 'https://pay.cryptodax.io',
-            'Description' => 'Public checkout site. The Pay button opens {base}/invoice/{invoice_id}.',
-        ],
-        'apiKey' => [
+    return array(
+        'FriendlyName' => array(
+            'Type'  => 'System',
+            'Value' => 'CryptoDAX Payment Gateway',
+        ),
+        'apiKey' => array(
             'FriendlyName' => 'API Key',
-            'Type' => 'password',
-            'Size' => '60',
-            'Default' => '',
-            'Description' => 'Merchant API key (Authorization: Bearer).',
-        ],
-        'webhookSecret' => [
-            'FriendlyName' => 'Webhook Secret',
-            'Type' => 'password',
-            'Size' => '60',
-            'Default' => '',
-            'Description' => 'Same value as CryptoDAX WEBHOOK_SECRET. Used to verify X-Webhook-Signature.',
-        ],
-    ];
+            'Type'         => 'password',
+            'Size'         => '60',
+            'Description'  => 'Your merchant API key from CryptoDAX',
+        ),
+        'apiUrl' => array(
+            'FriendlyName' => 'API URL',
+            'Type'         => 'text',
+            'Size'         => '60',
+            'Default'      => 'https://pay.cryptodax.io/api',
+            'Description'  => 'Base API URL, without a trailing slash (for example https://pay.cryptodax.io/api)',
+        ),
+        'checkoutUrl' => array(
+            'FriendlyName' => 'Checkout URL',
+            'Type'         => 'text',
+            'Size'         => '60',
+            'Default'      => 'https://pay.cryptodax.io',
+            'Description'  => 'If the API does not return a checkout_url, the customer is sent to {Checkout URL}/payment/{invoice_id}',
+        ),
+        'expireMinutes' => array(
+            'FriendlyName' => 'Expire (minutes)',
+            'Type'         => 'text',
+            'Size'         => '5',
+            'Default'      => '30',
+            'Description'  => 'How long the payment invoice stays valid',
+        ),
+    );
 }
 
-/**
- * Create/retrieve a CryptoDAX invoice and render a Pay button.
- *
- * POST /api/v1/invoices
- * Duplicate WHMCS invoice IDs reuse the same CryptoDAX order_id.
- */
 function cryptodax_link($params)
 {
-    $invoiceId = (string) $params['invoiceid'];
-    $amount = number_format((float) $params['amount'], 2, '.', '');
-    $currency = strtoupper((string) $params['currency']);
-    $description = (string) ($params['description'] ?? ('WHMCS Invoice #' . $invoiceId));
+    $invoiceId = (int) $params['invoiceid'];
+    $amount    = (float) $params['amount'];   // already converted if "Convert To For Processing" is set
+    $currency  = strtoupper($params['currency']);
+    $lang      = isset($params['langpaynow']) ? $params['langpaynow'] : 'Pay Now';
 
     if ($currency !== 'USD') {
-        return '<div class="alert alert-danger">CryptoDAX currently accepts WHMCS invoices in USD only.</div>';
+        return '<div class="alert alert-danger">CryptoDAX accepts USD only. In the gateway settings, set Convert To For Processing to USD.</div>';
+    }
+    if (trim($params['apiKey']) === '' || trim($params['apiUrl']) === '') {
+        return '<div class="alert alert-danger">The CryptoDAX gateway is not configured.</div>';
     }
 
-    $apiUrl = rtrim((string) $params['apiUrl'], '/');
-    $checkoutBaseUrl = rtrim((string) ($params['checkoutBaseUrl'] ?? ''), '/');
-    $apiKey = trim((string) $params['apiKey']);
+    // Only create the remote invoice when the client actually clicks the button,
+    // not every time the invoice page is rendered.
+    $clicked = isset($_POST['cryptodax_pay'])
+        && isset($_POST['cryptodax_invoice'])
+        && (int) $_POST['cryptodax_invoice'] === $invoiceId;
 
-    if ($apiUrl === '' || $apiKey === '' || $checkoutBaseUrl === '') {
-        logTransaction('CryptoDAX', ['invoice_id' => $invoiceId], 'Gateway Configuration Error');
-        return '<div class="alert alert-danger">CryptoDAX is not configured correctly.</div>';
+    if (!$clicked) {
+        $token = function_exists('generate_token') ? generate_token('plain') : '';
+        return '<form method="post" action="">'
+            . '<input type="hidden" name="token" value="' . htmlspecialchars($token) . '" />'
+            . '<input type="hidden" name="cryptodax_invoice" value="' . $invoiceId . '" />'
+            . '<input type="submit" name="cryptodax_pay" class="btn btn-success" value="' . htmlspecialchars($lang) . '" />'
+            . '</form>';
     }
 
-    $payload = [
-        'amount' => $amount,
-        'currency' => 'USD',
-        'order_id' => $invoiceId,
-        'description' => $description,
-        'expire_minutes' => 1440,
-    ];
+    $systemUrl   = rtrim($params['systemurl'], '/');
+    $callbackUrl = $systemUrl . '/modules/gateways/callback/cryptodax.php';
+    // order_id = "<WHMCS invoice id>-<random>" : unique per attempt, and the callback
+    // reads the WHMCS invoice id back from the order_id that the API confirms.
+    $orderId     = $invoiceId . '-' . bin2hex(random_bytes(8));
+    $description = 'Invoice #' . $invoiceId . ' - ' . $params['companyname'];
 
-    $ch = curl_init($apiUrl . '/v1/invoices');
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST => true,
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_TIMEOUT => 30,
-        CURLOPT_HTTPHEADER => [
-            'Authorization: Bearer ' . $apiKey,
-            'Content-Type: application/json',
-            'Accept: application/json',
-        ],
-        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_SLASHES),
-    ]);
+    list($code, $json, $raw, $err) = cryptodax_create_invoice($params, $amount, $orderId, $description, $callbackUrl);
 
-    $response = curl_exec($ch);
-    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_error($ch);
-    curl_close($ch);
+    if ($code === 201 && !empty($json['invoice_id'])) {
+        $idGet = $json['invoice_id'];
+        $go = !empty($json['checkout_url'])
+            ? $json['checkout_url']
+            : rtrim($params['checkoutUrl'], '/') . '/payment/' . rawurlencode($idGet);
 
-    if ($response === false || $curlError !== '') {
-        logTransaction(
-            'CryptoDAX',
-            ['invoice_id' => $invoiceId, 'error' => $curlError],
-            'Create Payment Connection Error'
-        );
+        logTransaction($params['paymentmethod'], array(
+            'action'     => 'create',
+            'invoiceid'  => $invoiceId,
+            'order_id'   => $orderId,
+            'invoice_id' => $idGet,
+            'amount'     => $amount,
+        ), 'Invoice Created');
 
-        return '<div class="alert alert-danger">Unable to connect to CryptoDAX.</div>';
+        $goHtml = htmlspecialchars($go, ENT_QUOTES);
+        return '<meta http-equiv="refresh" content="0;url=' . $goHtml . '" />'
+            . '<script>window.location.href=' . json_encode($go) . ';</script>'
+            . '<a class="btn btn-success" href="' . $goHtml . '">Continue to payment</a>';
     }
 
-    $data = json_decode((string) $response, true);
+    logTransaction($params['paymentmethod'], array(
+        'action'    => 'create',
+        'invoiceid' => $invoiceId,
+        'http_code' => $code,
+        'curl'      => $err,
+        'response'  => $raw,
+    ), 'Create Failed');
 
-    if (
-        $httpCode < 200 ||
-        $httpCode >= 300 ||
-        !is_array($data) ||
-        empty($data['invoice_id'])
-    ) {
-        logTransaction(
-            'CryptoDAX',
-            [
-                'invoice_id' => $invoiceId,
-                'http_code' => $httpCode,
-                'response' => is_array($data) ? $data : (string) $response,
-            ],
-            'Create Payment Error'
-        );
-
-        return '<div class="alert alert-danger">Unable to create CryptoDAX payment.</div>';
-    }
-
-    $checkoutUrl = $checkoutBaseUrl . '/invoice/' . rawurlencode((string) $data['invoice_id']);
-    $safeCheckoutUrl = htmlspecialchars($checkoutUrl, ENT_QUOTES, 'UTF-8');
-    $buttonText = htmlspecialchars((string) ($params['langpaynow'] ?? 'Pay Now'), ENT_QUOTES, 'UTF-8');
-
-    return '<form method="get" action="' . $safeCheckoutUrl . '">'
-        . '<button type="submit" class="btn btn-primary">' . $buttonText . ' with CryptoDAX</button>'
-        . '</form>';
+    $msg = is_array($json) && isset($json['detail']) ? (is_string($json['detail']) ? $json['detail'] : json_encode($json['detail'])) : 'HTTP ' . $code;
+    return '<div class="alert alert-danger">Could not connect to CryptoDAX: ' . htmlspecialchars($msg) . '</div>';
 }
